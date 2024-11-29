@@ -1,0 +1,12 @@
+LICENSE
+README.md
+requirements.txt
+setup.py
+windsurf_scraper/__init__.py
+windsurf_scraper/scraper.py
+windsurf_scraper.egg-info/PKG-INFO
+windsurf_scraper.egg-info/SOURCES.txt
+windsurf_scraper.egg-info/dependency_links.txt
+windsurf_scraper.egg-info/entry_points.txt
+windsurf_scraper.egg-info/requires.txt
+windsurf_scraper.egg-info/top_level.txt

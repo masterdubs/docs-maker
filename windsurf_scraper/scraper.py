@@ -15,6 +15,8 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from tqdm import tqdm
 import markdown
+import subprocess
+from pathlib import Path
 
 class DocumentationScraper:
     def __init__(self, base_dir="doc-resource"):
@@ -22,9 +24,10 @@ class DocumentationScraper:
         self.content_dir = os.path.join(base_dir, "content")
         self.index_dir = os.path.join(base_dir, "index")
         self.embeddings_dir = os.path.join(base_dir, "embeddings")
+        self.repos_dir = os.path.join(base_dir, "repos")
         
         # Create necessary directories
-        for directory in [self.content_dir, self.index_dir, self.embeddings_dir]:
+        for directory in [self.content_dir, self.index_dir, self.embeddings_dir, self.repos_dir]:
             if not os.path.exists(directory):
                 os.makedirs(directory)
         
@@ -273,6 +276,136 @@ class DocumentationScraper:
             print(f"Error scraping {url}: {str(e)}")
             return None
 
+    def clone_github_repo(self, repo_url):
+        """Clone a GitHub repository and process its contents.
+        
+        Args:
+            repo_url (str): URL of the GitHub repository (e.g., 'https://github.com/username/repo')
+        """
+        # Extract repo name from URL
+        repo_name = repo_url.rstrip('/').split('/')[-1]
+        repo_path = os.path.join(self.repos_dir, repo_name)
+        
+        # Clone or update the repository
+        if os.path.exists(repo_path):
+            print(f"Repository {repo_name} exists, pulling latest changes...")
+            subprocess.run(['git', '-C', repo_path, 'pull'], check=True)
+        else:
+            print(f"Cloning repository {repo_name}...")
+            subprocess.run(['git', 'clone', repo_url, repo_path], check=True)
+        
+        # Process repository contents
+        repo_files = []
+        for root, _, files in os.walk(repo_path):
+            if '.git' in root:  # Skip .git directory
+                continue
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Generate a unique ID for this file
+                    relative_path = os.path.relpath(file_path, repo_path)
+                    file_id = self._get_safe_filename(f"{repo_url}/{relative_path}")
+                    
+                    # Store the content
+                    content_path = os.path.join(self.content_dir, file_id)
+                    with open(content_path, 'w', encoding='utf-8') as f:
+                        json.dump({
+                            'url': f"{repo_url}/blob/main/{relative_path}",
+                            'path': relative_path,
+                            'content': content,
+                            'type': 'github_file'
+                        }, f, indent=2)
+                    
+                    # Update metadata
+                    metadata = self._load_metadata()
+                    metadata[file_id] = {
+                        'url': f"{repo_url}/blob/main/{relative_path}",
+                        'title': relative_path,
+                        'type': 'github_file',
+                        'timestamp': datetime.now().isoformat(),
+                        'repo_url': repo_url
+                    }
+                    self._save_metadata(metadata)
+                    
+                    repo_files.append(file_id)
+                except UnicodeDecodeError:
+                    # Skip binary files
+                    continue
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+        
+        return repo_files
+
+    def detect_url_type(self, url):
+        """Detect the type of URL (GitHub repo, documentation site, etc.)
+        
+        Returns:
+            tuple: (type, parsed_url)
+            where type is one of: 'github_repo', 'documentation', 'unknown'
+        """
+        parsed = urlparse(url)
+        
+        # GitHub repository detection
+        if parsed.netloc == 'github.com':
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if len(path_parts) >= 2:  # username/repo format
+                return 'github_repo', url
+        
+        # Common documentation sites
+        doc_domains = {
+            'docs.python.org', 'docs.github.com', 'docs.docker.com', 
+            'developer.mozilla.org', 'docs.aws.amazon.com', 'kubernetes.io',
+            'docs.microsoft.com', 'cloud.google.com'
+        }
+        if parsed.netloc in doc_domains:
+            return 'documentation', url
+            
+        # Try to detect if it's a documentation page by checking response headers and content
+        try:
+            response = self.session.head(url, allow_redirects=True)
+            content_type = response.headers.get('content-type', '')
+            
+            if 'text/html' in content_type:
+                # Make a GET request to check content
+                response = self.session.get(url)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Common documentation indicators
+                doc_indicators = [
+                    'documentation', 'docs', 'api reference', 'developer guide',
+                    'manual', 'reference', 'guide', 'tutorial'
+                ]
+                
+                # Check title and meta description
+                title = soup.title.string.lower() if soup.title else ''
+                meta_desc = soup.find('meta', {'name': 'description'})
+                desc = meta_desc.get('content', '').lower() if meta_desc else ''
+                
+                if any(indicator in title.lower() or indicator in desc.lower() 
+                       for indicator in doc_indicators):
+                    return 'documentation', url
+        except Exception:
+            pass
+            
+        return 'unknown', url
+
+    def process_url(self, url, max_depth=2):
+        """Process any URL automatically by detecting its type"""
+        url_type, processed_url = self.detect_url_type(url)
+        
+        print(f"Detected URL type: {url_type}")
+        
+        if url_type == 'github_repo':
+            return self.clone_github_repo(processed_url)
+        elif url_type == 'documentation':
+            return self.scrape_url(processed_url, max_depth=max_depth)
+        else:
+            print(f"Warning: Unable to determine URL type for {url}. Treating as documentation...")
+            return self.scrape_url(processed_url, max_depth=max_depth)
+
     def refresh_docs(self, urls=None):
         """Refresh existing documentation or specific URLs"""
         metadata = self._load_metadata()
@@ -353,35 +486,42 @@ class DocumentationScraper:
                 print(f"Summary: {data['summary']}")
             print("-" * 50)
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description='Scrape documentation and GitHub pages for local reference')
-    parser.add_argument('urls', nargs='*', help='URLs to scrape')
-    parser.add_argument('-l', '--list', action='store_true', help='List all scraped pages')
+    parser.add_argument('urls', nargs='*', help='URLs to scrape (automatically detects GitHub repos and documentation sites)')
     parser.add_argument('-d', '--directory', default='doc-resource', help='Directory to store scraped content (default: doc-resource)')
     parser.add_argument('--depth', type=int, default=2, help='Maximum depth to follow links (default: 2)')
     parser.add_argument('--refresh', action='store_true', help='Refresh existing documentation')
-    parser.add_argument('--refresh-urls', nargs='+', help='Refresh specific URLs')
-    parser.add_argument('--search', type=str, help='Perform semantic search across documentation')
-    parser.add_argument('--top-k', type=int, default=5, help='Number of top results to return in search (default: 5)')
+    parser.add_argument('--refresh-urls', nargs='*', help='Refresh specific URLs')
+    parser.add_argument('--search', help='Search documentation')
+    parser.add_argument('--limit', type=int, default=5, help='Limit search results (default: 5)')
+    parser.add_argument('-l', '--list', action='store_true', help='List all scraped pages')
     
     args = parser.parse_args()
-    
-    scraper = DocumentationScraper(base_dir=args.directory)
+    scraper = DocumentationScraper(args.directory)
     
     if args.search:
-        results = scraper.semantic_search(args.search, args.top_k)
-        print("\nSearch Results:")
-        for i, result in enumerate(results, 1):
-            print(f"\n{i}. {result['title']} - {result['section']}")
+        results = scraper.semantic_search(args.search, limit=args.limit)
+        for result in results:
+            print("\n---")
+            print(f"Title: {result['title']}")
             print(f"URL: {result['url']}")
             print(f"Relevance: {result['similarity']:.2f}")
             print(f"Summary: {result['summary']}")
     elif args.refresh or args.refresh_urls:
         scraper.refresh_docs(args.refresh_urls)
     elif args.list:
-        scraper.list_scraped_pages()
+        metadata = scraper._load_metadata()
+        for doc_id, data in metadata.items():
+            print(f"\nDocument ID: {doc_id}")
+            print(f"Title: {data['title']}")
+            print(f"URL: {data['url']}")
+            print(f"Last Updated: {data['timestamp']}")
     elif args.urls:
         for url in args.urls:
-            scraper.scrape_url(url, max_depth=args.depth)
+            scraper.process_url(url, max_depth=args.depth)
     else:
         parser.print_help()
+
+if __name__ == "__main__":
+    main()

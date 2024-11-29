@@ -1,0 +1,2 @@
+[console_scripts]
+windsurf-scraper = windsurf_scraper.scraper:main
