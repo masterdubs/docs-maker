@@ -1,0 +1,10 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.2
+python-dateutil>=2.8.2
+urllib3>=2.0.7
+nltk>=3.8.1
+markdown>=3.5.1
+html2text>=2020.1.16
+sentence-transformers>=2.2.2
+numpy>=1.24.3
+tqdm>=4.66.1
